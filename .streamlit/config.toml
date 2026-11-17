@@ -1,0 +1,11 @@
+# Streamlit theme — dark fintech palette (values from the dataviz reference palette).
+[theme]
+base = "dark"
+primaryColor = "#3987e5"           # accent blue (categorical slot 1)
+backgroundColor = "#0d0d0d"        # page plane
+secondaryBackgroundColor = "#1a1a19"  # chart / card surface
+textColor = "#ffffff"              # primary ink
+font = "sans serif"
+
+[server]
+headless = true
