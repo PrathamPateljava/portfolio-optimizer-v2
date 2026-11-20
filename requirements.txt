@@ -12,7 +12,7 @@ scipy>=1.13
 
 # --- Persistence ---
 SQLAlchemy>=2.0
-psycopg2-binary>=2.9   # Postgres driver for Neon (prod); SQLite still works locally
+psycopg[binary]>=3.1   # Postgres driver (v3) for Neon's postgresql+psycopg:// URL; SQLite still works locally
 
 # --- Frontend ---
 streamlit>=1.36
