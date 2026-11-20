@@ -369,18 +369,25 @@ if portfolios:
     )
 
     labels = {f"#{p['id']} — {p['name']}": p["id"] for p in portfolios}
-    rc1, rc2, rc3 = st.columns([2, 1, 1])
+    rc1, rc2, rc3, rc4 = st.columns([2, 1.3, 1, 1])
     chosen = rc1.selectbox("Portfolio", list(labels.keys()))
     rb_method = rc2.selectbox("Target method", ["max_sharpe", "min_variance"],
                               format_func=lambda m: METHOD_LABELS[m], key="rb_method")
-    band = rc3.slider("Drift band", 0.0, 0.25, 0.05, step=0.01,
-                      help="Only trade a holding if |current − target| exceeds this.")
+    band = rc3.slider("Drift band (abs)", 0.0, 0.25, 0.05, step=0.01,
+                      help="Absolute band: trade a holding if |current − target| exceeds this.")
+    rel_band = rc4.slider("Relative band", 0.0, 1.0, 0.25, step=0.05,
+                          help="5/25 rule: also trade when a holding drifts past this fraction of "
+                               "its OWN target weight, so small positions aren't frozen. 0 = off.")
+    st.caption("↻ Rebalance **periodically — monthly or quarterly** (quarterly is a good default), "
+               "not daily or weekly. Frequent checks just add trading costs and chase noise; the "
+               "bands already suppress tiny trades, and fundamentals barely move week to week.")
 
     if st.button("♻️ Compute rebalance", type="primary"):
         try:
             with st.spinner("Recomputing targets from live prices…"):
                 rb = post("/rebalance", {"portfolio_id": labels[chosen],
-                                         "method": rb_method, "drift_band": band})
+                                         "method": rb_method, "drift_band": band,
+                                         "relative_band": rel_band})
             tc = rb["turnover"]
             st.markdown(f'<div class="kpi-row"><div class="kpi" style="max-width:220px">'
                         f'<div class="kpi-accent" style="background:{ACCENT}"></div>'
@@ -403,7 +410,7 @@ if portfolios:
                     },
                 )
             else:
-                st.success("No trades needed — all holdings are within the drift band.")
+                st.success("No trades needed — all holdings are within their bands.")
         except httpx.HTTPStatusError as exc:
             st.error(f"Rebalance failed: {_error_detail(exc)}")
         except httpx.HTTPError as exc:

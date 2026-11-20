@@ -100,7 +100,12 @@ class PortfolioOut(BaseModel):
 class RebalanceRequest(BaseModel):
     portfolio_id: int
     method: OptimizationMethod = OptimizationMethod.MAX_SHARPE
-    drift_band: float = Field(0.05, ge=0, description="Rebalance a holding if |current-target| exceeds this")
+    drift_band: float = Field(0.05, ge=0, description="Absolute band: trade a holding if |current-target| exceeds this")
+    relative_band: float = Field(
+        0.25, ge=0,
+        description="5/25 rule: also trade when a holding drifts past this fraction of its OWN "
+                    "target weight (whichever band is tighter wins). 0 disables the relative arm.",
+    )
 
 
 class RebalanceAction(BaseModel):

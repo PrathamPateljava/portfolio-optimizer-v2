@@ -185,7 +185,9 @@ def rebalance(req: RebalanceRequest, db: Session = Depends(get_session)) -> Reba
     w, opt_tickers, mu_used, sigma_used, rf, _ = _run_optimization(opt_req)
     target = {t: float(wi) for t, wi in zip(opt_tickers, w)}
 
-    actions, turnover = rebalancing.compute_rebalance(current, target, req.drift_band)
+    actions, turnover = rebalancing.compute_rebalance(
+        current, target, req.drift_band, req.relative_band
+    )
     metrics = metrics_mod.portfolio_metrics(w, mu_used, sigma_used, rf)
     return RebalanceResponse(
         portfolio_id=req.portfolio_id, actions=actions, turnover=turnover, rebalanced_metrics=metrics
