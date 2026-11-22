@@ -106,3 +106,34 @@ def test_rename_is_user_scoped(client):
     r = client.patch(f"/portfolios/{pid}", json={"name": "NewName"}, headers=ha)
     assert r.status_code == 200 and r.json()["name"] == "NewName"
     assert client.get(f"/portfolios/{pid}", headers=ha).json()["name"] == "NewName"  # persisted
+
+
+# A full optimize result as the frontend would snapshot it at save time.
+SNAPSHOT = {
+    "method": "max_sharpe",
+    "allocations": [{"ticker": "AAPL", "weight": 0.6}, {"ticker": "MSFT", "weight": 0.4}],
+    "metrics": {"expected_return": 0.21, "volatility": 0.18, "sharpe": 0.95, "risk_free_rate": 0.043},
+    "frontier": [{"volatility": 0.15, "expected_return": 0.1, "sharpe": 0.4},
+                 {"volatility": 0.2, "expected_return": 0.22, "sharpe": 0.9}],
+}
+
+
+def test_snapshot_round_trips(client):
+    """A saved snapshot comes back byte-for-byte on GET and in the list, so the
+    UI can restore the exact charts/returns/risk later."""
+    ha = {"Authorization": f"Bearer {_token(client, ALICE)}"}
+    pid = client.post("/portfolios", json={**PF, "name": "Snap", "snapshot": SNAPSHOT},
+                      headers=ha).json()["id"]
+
+    got = client.get(f"/portfolios/{pid}", headers=ha).json()
+    assert got["snapshot"] == SNAPSHOT
+
+    listed = [p for p in client.get("/portfolios", headers=ha).json() if p["id"] == pid][0]
+    assert listed["snapshot"] == SNAPSHOT
+
+
+def test_snapshot_is_optional(client):
+    """Saving without a snapshot (legacy/omitted) still works and reports None."""
+    ha = {"Authorization": f"Bearer {_token(client, ALICE)}"}
+    pid = client.post("/portfolios", json={**PF, "name": "NoSnap"}, headers=ha).json()["id"]
+    assert client.get(f"/portfolios/{pid}", headers=ha).json()["snapshot"] is None

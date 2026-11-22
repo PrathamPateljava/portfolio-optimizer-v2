@@ -86,6 +86,10 @@ class PortfolioCreate(BaseModel):
     name: str
     market: Market
     holdings: list[HoldingIn]
+    # Full optimize result shown at save time (method, allocations, metrics,
+    # frontier) so the UI can restore the exact charts/returns/risk later.
+    # Free-form so the contract doesn't break if OptimizeResponse evolves.
+    snapshot: dict | None = None
 
 
 class PortfolioOut(BaseModel):
@@ -93,6 +97,8 @@ class PortfolioOut(BaseModel):
     name: str
     market: Market
     holdings: list[HoldingIn]
+    # Present only if captured at save time; used to restore the saved view.
+    snapshot: dict | None = None
 
 
 class PortfolioUpdate(BaseModel):

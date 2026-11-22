@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, create_engine, inspect, text
+from sqlalchemy import DateTime, Float, ForeignKey, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from ..config import settings
@@ -42,6 +42,11 @@ class Portfolio(Base):
     # Nullable so the column can be back-filled onto an existing table and so
     # legacy pre-auth rows remain valid (they just won't belong to any user).
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
+    # JSON snapshot of the full optimize result shown when the portfolio was
+    # saved (method, allocations, metrics, frontier). Lets the UI restore the
+    # exact charts/returns/risk later instead of only the raw weights. Nullable
+    # so legacy rows (and pre-snapshot saves) stay valid.
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     owner: Mapped["User | None"] = relationship(back_populates="portfolios")
     holdings: Mapped[list["Holding"]] = relationship(
@@ -83,10 +88,28 @@ def _ensure_user_id_column() -> None:
         conn.execute(text("ALTER TABLE portfolios ADD COLUMN user_id INTEGER"))
 
 
+def _ensure_result_json_column() -> None:
+    """Back-fill the portfolios.result_json column on an already-existing table.
+
+    Same reasoning as _ensure_user_id_column: create_all never alters existing
+    tables, so a DB that predates the snapshot feature keeps the old schema.
+    Adds the column once, idempotently, across SQLite/Postgres.
+    """
+    insp = inspect(engine)
+    if not insp.has_table("portfolios"):
+        return
+    cols = {c["name"] for c in insp.get_columns("portfolios")}
+    if "result_json" in cols:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE portfolios ADD COLUMN result_json TEXT"))
+
+
 def init_db() -> None:
     """Create tables (users/portfolios/holdings) and run light migrations."""
     Base.metadata.create_all(bind=engine)
     _ensure_user_id_column()
+    _ensure_result_json_column()
 
 
 def get_session():

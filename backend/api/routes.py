@@ -3,6 +3,7 @@ functions and contains almost no math itself.
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import numpy as np
@@ -94,11 +95,18 @@ def _run_optimization(
 
 
 def _to_portfolio_out(p: Portfolio) -> PortfolioOut:
+    snapshot = None
+    if p.result_json:
+        try:
+            snapshot = json.loads(p.result_json)
+        except (ValueError, TypeError):
+            snapshot = None  # corrupt/legacy payload: fall back to holdings only
     return PortfolioOut(
         id=p.id,
         name=p.name,
         market=Market(p.market),
         holdings=[HoldingIn(ticker=h.ticker, weight=h.weight) for h in p.holdings],
+        snapshot=snapshot,
     )
 
 

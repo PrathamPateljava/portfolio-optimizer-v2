@@ -6,6 +6,8 @@ so one account can never see or touch another's books.
 """
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -37,7 +39,12 @@ def create_user(db: Session, email: str, password_hash: str) -> User:
 
 def create_portfolio(db: Session, data: PortfolioCreate, user_id: int) -> Portfolio:
     """Insert a Portfolio (owned by user_id) plus its Holdings."""
-    portfolio = Portfolio(name=data.name, market=data.market.value, user_id=user_id)
+    portfolio = Portfolio(
+        name=data.name,
+        market=data.market.value,
+        user_id=user_id,
+        result_json=json.dumps(data.snapshot) if data.snapshot is not None else None,
+    )
     portfolio.holdings = [
         Holding(ticker=h.ticker, weight=h.weight) for h in data.holdings
     ]
