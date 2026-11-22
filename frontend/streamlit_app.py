@@ -155,9 +155,16 @@ def _error_detail(exc: httpx.HTTPStatusError) -> str:
         return str(exc)
 
 
-def _logout() -> None:
+def _logout(clear_strategy: bool = False) -> None:
     st.session_state.pop("token", None)
     st.session_state.pop("user_email", None)
+    # On an EXPLICIT logout, also wipe the on-screen strategy so the view returns
+    # to the default empty state (otherwise the optimized allocation stays visible
+    # to whoever uses the machine next). Background session-expiry paths keep it,
+    # so a user can re-login without losing the work they're looking at.
+    if clear_strategy:
+        for _k in ("result", "result_market", "result_method"):
+            st.session_state.pop(_k, None)
     _cookie_delete(_TOKEN_COOKIE)
 
 
@@ -272,7 +279,7 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
         if st.button("Log out", width="stretch"):
-            _logout()
+            _logout(clear_strategy=True)
             st.rerun()
     else:
         with st.expander("🔒 Sign in / Create account", expanded=False):
