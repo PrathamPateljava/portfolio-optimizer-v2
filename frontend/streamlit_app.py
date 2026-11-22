@@ -10,6 +10,7 @@ for the Sharpe magnitude; the excess-return delta uses reserved status colors.
 """
 from __future__ import annotations
 
+import math
 import os
 
 import httpx
@@ -44,6 +45,11 @@ METHOD_LABELS = {
     "min_variance": "MPT · Min Variance",
     "efficient_frontier": "MPT · Efficient Frontier",
     "black_litterman": "Black–Litterman",
+}
+
+DEFAULT_TICKERS = {
+    "NASDAQ": "AAPL, MSFT, GOOGL, AMZN, NVDA",
+    "NSE": "RELIANCE.NS, TCS.NS, HDFCBANK.NS, INFY.NS, ITC.NS",
 }
 
 st.set_page_config(page_title="Portfolio Optimizer", layout="wide", page_icon="📈")
@@ -272,6 +278,23 @@ if _pending:
         _cookie_delete(_TOKEN_COOKIE)  # also drops it from the in-memory cache,
         # so the restore block below won't log the session straight back in.
 
+# Apply an investment-amount restore deferred from opening a saved portfolio.
+# Must run before the amount number_input is created, so it sets the widget's
+# session_state value cleanly rather than mutating it mid-run.
+if "_pending_amount" in st.session_state:
+    st.session_state["amount_input"] = st.session_state.pop("_pending_amount")
+
+# Apply a sidebar restore deferred from opening a saved portfolio — likewise
+# before the sidebar widgets are created, so market/tickers/method/lookback/
+# short are set cleanly for easy editing and re-optimizing.
+_ps = st.session_state.pop("_pending_sidebar", None)
+if _ps:
+    st.session_state["market_select"] = _ps["market"]
+    st.session_state["tickers_input"] = _ps["tickers"]
+    st.session_state["method_select"] = _ps["method"]
+    st.session_state["lookback_input"] = _ps["lookback"]
+    st.session_state["allow_short_check"] = _ps["allow_short"]
+
 
 # Restore a prior session from the cookie so a hard refresh doesn't log you out.
 # esc returns None on the very first run, then reruns once its component mounts,
@@ -334,17 +357,32 @@ with st.sidebar:
                         st.error(f"Could not reach the API: {exc}")
     st.markdown("---")
 
-    market = st.selectbox("Market", ["NASDAQ", "NSE"])
-    default_tickers = ("AAPL, MSFT, GOOGL, AMZN, NVDA" if market == "NASDAQ"
-                       else "RELIANCE.NS, TCS.NS, HDFCBANK.NS, INFY.NS, ITC.NS")
-    tickers_raw = st.text_area("Tickers (comma-separated)", value=default_tickers,
+    # Seed widget state once so the keyed inputs below have defaults and can be
+    # pre-filled when a saved portfolio is opened (see _pending_sidebar).
+    if "tickers_input" not in st.session_state:
+        st.session_state["tickers_input"] = DEFAULT_TICKERS["NASDAQ"]
+    if "lookback_input" not in st.session_state:
+        st.session_state["lookback_input"] = 365
+    if "allow_short_check" not in st.session_state:
+        st.session_state["allow_short_check"] = False
+
+    def _on_market_change() -> None:
+        # Switching market swaps in that market's default tickers (same as before,
+        # now done via session_state since the field is keyed).
+        st.session_state["tickers_input"] = DEFAULT_TICKERS[st.session_state["market_select"]]
+
+    market = st.selectbox("Market", ["NASDAQ", "NSE"], key="market_select",
+                          on_change=_on_market_change)
+    tickers_raw = st.text_area("Tickers (comma-separated)", key="tickers_input",
                                help="NSE tickers need the .NS suffix, e.g. RELIANCE.NS")
     tickers = [t.strip() for t in tickers_raw.split(",") if t.strip()]
 
     method = st.selectbox("Optimization method", list(METHOD_LABELS),
-                          format_func=lambda m: METHOD_LABELS[m])
-    lookback = st.slider("Lookback (days)", 60, 1095, 365)
-    allow_short = st.checkbox("Allow short positions", value=False)
+                          format_func=lambda m: METHOD_LABELS[m], key="method_select")
+    lookback = st.number_input("Lookback (days)", min_value=60, max_value=1095, step=1,
+                               key="lookback_input",
+                               help="History window for returns/covariance (60–1095 days).")
+    allow_short = st.checkbox("Allow short positions", key="allow_short_check")
 
     views: list[dict] = []
     if method == "black_litterman":
@@ -403,6 +441,11 @@ if run:
                 st.session_state["result"] = post("/optimize", payload)
                 st.session_state["result_market"] = market
                 st.session_state["result_method"] = method
+                # Remember the request so saving can store it and opening the
+                # portfolio later can refill the sidebar for easy edits.
+                st.session_state["result_request"] = {
+                    "market": market, "method": method, "tickers": tickers,
+                    "lookback_days": int(lookback), "allow_short": bool(allow_short)}
         except httpx.HTTPStatusError as exc:
             st.error(f"Optimization failed: {_error_detail(exc)}")
         except httpx.HTTPError as exc:
@@ -472,16 +515,6 @@ else:
             x=0.5, y=0.5, font=dict(size=17, color=INK), showarrow=False)])
         st.plotly_chart(style_fig(donut, 360), width="stretch", config=PLOTLY_CFG)
 
-        show = alloc_df.assign(weight=lambda d: d["weight"] * 100)
-        st.dataframe(
-            show, hide_index=True, width="stretch",
-            column_config={
-                "ticker": st.column_config.TextColumn("Ticker"),
-                "weight": st.column_config.ProgressColumn(
-                    "Weight", format="%.2f%%", min_value=0, max_value=100),
-            },
-        )
-
     with right:
         frontier = result.get("frontier") or []
         if frontier:
@@ -515,6 +548,67 @@ else:
             st.plotly_chart(style_fig(fig, 430), width="stretch", config=PLOTLY_CFG)
             st.caption("Switch to the Efficient Frontier method to trace the full risk/return curve.")
 
+    # --- Investment plan: size each position for the chosen capital ---
+    section("Investment plan", "enter your capital for a per-stock buy list")
+    CUR = "₹" if res_market == "NSE" else "$"
+    if "amount_input" not in st.session_state:
+        st.session_state["amount_input"] = 10000.0
+    ac1, _ = st.columns([1, 3])
+    amount = ac1.number_input(f"Investment amount ({CUR})", min_value=0.0, step=100.0,
+                              key="amount_input", format="%.2f")
+
+    plan = alloc_df.copy()
+    if "price" not in plan.columns:
+        plan["price"] = pd.NA
+    plan["price"] = pd.to_numeric(plan["price"], errors="coerce")
+    plan["target"] = plan["weight"] * amount
+
+    def _shares(row) -> int:
+        p = row["price"]
+        if pd.isna(p) or p <= 0:
+            return 0
+        # Floor: buy whole shares only, and never exceed the target amount (so the
+        # total stays within the user's capital). The remainder stays as cash.
+        return int(math.floor(row["target"] / p))
+
+    plan["shares"] = plan.apply(_shares, axis=1).astype(int)
+    plan["cost"] = plan["shares"] * plan["price"].fillna(0.0)
+    plan = plan.sort_values("weight", ascending=False)
+
+    has_prices = bool((plan["price"].fillna(0) > 0).any())
+    invested = float(plan["cost"].sum())
+    leftover = max(amount - invested, 0.0)
+
+    disp = plan.assign(weight=lambda d: d["weight"] * 100)[
+        ["ticker", "weight", "price", "target", "shares", "cost"]]
+    st.dataframe(
+        disp, hide_index=True, width="stretch",
+        column_config={
+            "ticker": st.column_config.TextColumn("Ticker"),
+            "weight": st.column_config.ProgressColumn("Weight", format="%.2f%%",
+                                                      min_value=0, max_value=100),
+            "price": st.column_config.NumberColumn("Price", format=f"{CUR}%.2f"),
+            "target": st.column_config.NumberColumn("Target", format=f"{CUR}%.2f",
+                                                    help="Weight × your capital."),
+            "shares": st.column_config.NumberColumn("Shares", format="%d",
+                                                    help="Whole shares to buy (rounded down)."),
+            "cost": st.column_config.NumberColumn("Cost", format=f"{CUR}%.2f",
+                                                  help="Shares × price."),
+        },
+    )
+    if has_prices:
+        sm = "".join([
+            kpi_card("Capital", f"{CUR}{amount:,.2f}", MUTED),
+            kpi_card("Invested", f"{CUR}{invested:,.2f}", ACCENT),
+            kpi_card("Cash left over", f"{CUR}{leftover:,.2f}", "#c98500"),
+        ])
+        st.markdown(f'<div class="kpi-row">{sm}</div>', unsafe_allow_html=True)
+        st.caption("Shares are **rounded down** (floor) so the total never exceeds your capital — "
+                   "the remainder stays as cash. Prices are the latest close; live fills will differ.")
+    else:
+        st.caption("This portfolio was saved before prices were captured, so share counts aren't "
+                   "available — re-optimize it in the sidebar to get a live buy list.")
+
     # --- Save this portfolio ---
     section("Save portfolio")
     if not st.session_state.get("token"):
@@ -526,12 +620,16 @@ else:
                                    placeholder="Portfolio name")
         if sc2.button("💾 Save", width="stretch"):
             try:
+                # Snapshot the full view (+ the request that produced it) so opening
+                # this portfolio later restores its exact charts/returns/risk AND
+                # refills the sidebar for editing.
+                snap_to_save = {**result, "request": st.session_state.get("result_request")}
                 saved = post("/portfolios", {
                     "name": save_name, "market": res_market,
                     "holdings": [{"ticker": a["ticker"], "weight": a["weight"]} for a in result["allocations"]],
-                    # Snapshot the full view so clicking this portfolio later restores
-                    # its exact charts/returns/risk, not just the raw weights.
-                    "snapshot": result},
+                    "snapshot": snap_to_save,
+                    # Capital deployed now, saved so growth can be tracked later.
+                    "initial_amount": float(st.session_state.get("amount_input") or 0.0)},
                     auth=True)
                 st.success(f"Saved portfolio #{saved['id']} — {saved['name']}")
             except httpx.HTTPStatusError as exc:
@@ -569,18 +667,24 @@ else:
 
     if portfolios:
         st.caption("Click a row to open a portfolio — its charts, returns and risk come back exactly as saved.")
+        _cur_sym = {"NSE": "₹", "NASDAQ": "$"}
         pf_df = pd.DataFrame([
             {"ID": p["id"], "Name": p["name"], "Market": p["market"],
              "Holdings": len(p["holdings"]),
+             "Invested": (f"{_cur_sym.get(p['market'], '$')}{p['initial_amount']:,.0f}"
+                          if p.get("initial_amount") else "—"),
              "Saved view": "✓" if p.get("snapshot") else "—"}
             for p in portfolios
         ])
         event = st.dataframe(
             pf_df, hide_index=True, width="stretch",
             on_select="rerun", selection_mode="single-row", key="saved_table",
-            column_config={"Saved view": st.column_config.TextColumn(
-                "Saved view",
-                help="✓ = its charts/returns/risk were captured and can be restored in one click.")},
+            column_config={
+                "Invested": st.column_config.TextColumn(
+                    "Invested", help="Capital saved with this portfolio, for tracking growth."),
+                "Saved view": st.column_config.TextColumn(
+                    "Saved view",
+                    help="✓ = its charts/returns/risk were captured and can be restored in one click.")},
         )
         sel_rows = event.selection.rows
 
@@ -591,39 +695,64 @@ else:
         chosen = f"#{active['id']} — {active['name']}"
 
         def _restore(p: dict) -> bool:
-            """Load a saved portfolio's snapshot into the main view. Returns False
-            if it was saved before snapshots existed (nothing to restore)."""
-            snap = p.get("snapshot")
-            if snap and snap.get("metrics") and snap.get("allocations"):
+            """Open a saved portfolio: refill the sidebar (market / tickers /
+            method / lookback / short) and the investment amount for easy editing,
+            and restore its saved charts/returns if a snapshot was captured.
+            Returns True if the full view was restored, False if only the sidebar
+            and amount could be (no snapshot). Values are staged in session_state
+            and applied at the top of the next run, before the widgets exist."""
+            snap = p.get("snapshot") or {}
+            req = snap.get("request") or {}
+            tickers_list = (req.get("tickers")
+                            or [h["ticker"] for h in p.get("holdings", [])]
+                            or [a["ticker"] for a in snap.get("allocations", [])])
+            st.session_state["_pending_sidebar"] = {
+                "market": p["market"],
+                "tickers": ", ".join(tickers_list),
+                "method": snap.get("method", req.get("method", "max_sharpe")),
+                "lookback": int(req.get("lookback_days", 365)),
+                "allow_short": bool(req.get("allow_short", False)),
+            }
+            if p.get("initial_amount") is not None:
+                st.session_state["_pending_amount"] = float(p["initial_amount"])
+            if snap.get("metrics") and snap.get("allocations"):
                 st.session_state["result"] = snap
                 st.session_state["result_method"] = snap.get("method", "max_sharpe")
                 st.session_state["result_market"] = p["market"]
+                # Keep the request around so re-saving without re-optimizing still
+                # stores it (and future opens keep refilling the sidebar).
+                st.session_state["result_request"] = {
+                    "market": p["market"], "method": snap.get("method", "max_sharpe"),
+                    "tickers": tickers_list, "lookback_days": int(req.get("lookback_days", 365)),
+                    "allow_short": bool(req.get("allow_short", False))}
                 return True
             return False
 
         _no_snapshot_msg = (
-            "This portfolio was saved before its charts were captured. Re-optimize it "
-            "in the sidebar and **Save** again to enable one-click restore. (Rebalancing "
-            "below still works — it recomputes targets from live prices.)")
+            "Sidebar filled from this portfolio for editing. Its charts weren't "
+            "captured at save time — re-optimize and **Save** again to restore those "
+            "too. (Rebalancing below still works — it recomputes from live prices.)")
 
         # Auto-open when the user clicks a *new* row. The id guard stops unrelated
         # reruns (and a fresh Optimize) from re-triggering or clobbering the view.
         if sel_rows and st.session_state.get("_opened_pid") != _sel_id:
             st.session_state["_opened_pid"] = _sel_id
-            if _restore(active):
-                st.rerun()
-            else:
-                st.warning(_no_snapshot_msg)
+            if not _restore(active):
+                st.session_state["_open_notice"] = _no_snapshot_msg
+            st.rerun()
 
         oc1, oc2 = st.columns([3, 1])
         oc1.markdown(f"**Selected:** {chosen}")
         if oc2.button("📂 Open", type="primary", width="stretch",
-                      help="Restore this portfolio's charts, returns and risk into the view above."):
-            if _restore(active):
-                st.session_state["_opened_pid"] = _sel_id
-                st.rerun()
-            else:
-                st.warning(_no_snapshot_msg)
+                      help="Load this portfolio: refill the sidebar for editing and restore its saved charts."):
+            st.session_state["_opened_pid"] = _sel_id
+            if not _restore(active):
+                st.session_state["_open_notice"] = _no_snapshot_msg
+            st.rerun()
+
+        _notice = st.session_state.pop("_open_notice", None)
+        if _notice:
+            st.info(_notice)
 
         # --- Rebalance the selected portfolio ---
         st.write("")
