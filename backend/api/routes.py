@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import date
 
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ..config import Market
@@ -15,7 +15,8 @@ from ..core import metrics as metrics_mod
 from ..core import mpt, rebalancing, returns
 from ..core.data_provider import YFinanceProvider, get_risk_free_rate
 from ..db import crud
-from ..db.models import Portfolio, get_session
+from ..db.models import Portfolio, User, get_session
+from .deps import get_current_user
 from ..schemas import (
     Allocation,
     FrontierPoint,
@@ -26,6 +27,7 @@ from ..schemas import (
     PortfolioCreate,
     PortfolioMetrics,
     PortfolioOut,
+    PortfolioUpdate,
     PriceQuote,
     RebalanceRequest,
     RebalanceResponse,
@@ -132,32 +134,72 @@ def latest_price(ticker: str) -> PriceQuote:
 # --- Portfolio CRUD --------------------------------------------------------
 
 @router.post("/portfolios", response_model=PortfolioOut)
-def create_portfolio(data: PortfolioCreate, db: Session = Depends(get_session)) -> PortfolioOut:
-    """Persist a portfolio."""
-    return _to_portfolio_out(crud.create_portfolio(db, data))
+def create_portfolio(
+    data: PortfolioCreate,
+    db: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> PortfolioOut:
+    """Persist a portfolio owned by the current user."""
+    return _to_portfolio_out(crud.create_portfolio(db, data, user.id))
 
 
 @router.get("/portfolios", response_model=list[PortfolioOut])
-def list_portfolios(db: Session = Depends(get_session)) -> list[PortfolioOut]:
-    """List saved portfolios."""
-    return [_to_portfolio_out(p) for p in crud.list_portfolios(db)]
+def list_portfolios(
+    db: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> list[PortfolioOut]:
+    """List the current user's saved portfolios."""
+    return [_to_portfolio_out(p) for p in crud.list_portfolios(db, user.id)]
 
 
 @router.get("/portfolios/{portfolio_id}", response_model=PortfolioOut)
-def get_portfolio(portfolio_id: int, db: Session = Depends(get_session)) -> PortfolioOut:
-    """Fetch one; 404 if missing."""
-    portfolio = crud.get_portfolio(db, portfolio_id)
+def get_portfolio(
+    portfolio_id: int,
+    db: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> PortfolioOut:
+    """Fetch one of the current user's portfolios; 404 if missing or not theirs."""
+    portfolio = crud.get_portfolio(db, portfolio_id, user.id)
     if portfolio is None:
         raise HTTPException(status_code=404, detail="portfolio not found")
     return _to_portfolio_out(portfolio)
 
 
+@router.patch("/portfolios/{portfolio_id}", response_model=PortfolioOut)
+def rename_portfolio(
+    portfolio_id: int,
+    data: PortfolioUpdate,
+    db: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> PortfolioOut:
+    """Rename one of the current user's portfolios; 404 if missing or not theirs."""
+    portfolio = crud.rename_portfolio(db, portfolio_id, user.id, data.name)
+    if portfolio is None:
+        raise HTTPException(status_code=404, detail="portfolio not found")
+    return _to_portfolio_out(portfolio)
+
+
+@router.delete("/portfolios/{portfolio_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_portfolio(
+    portfolio_id: int,
+    db: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> None:
+    """Delete one of the current user's portfolios; 404 if missing or not theirs."""
+    if not crud.delete_portfolio(db, portfolio_id, user.id):
+        raise HTTPException(status_code=404, detail="portfolio not found")
+
+
 # --- Rebalancing -----------------------------------------------------------
 
 @router.post("/rebalance", response_model=RebalanceResponse)
-def rebalance(req: RebalanceRequest, db: Session = Depends(get_session)) -> RebalanceResponse:
-    """Compute rebalancing actions for a saved portfolio."""
-    portfolio = crud.get_portfolio(db, req.portfolio_id)
+def rebalance(
+    req: RebalanceRequest,
+    db: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> RebalanceResponse:
+    """Compute rebalancing actions for one of the current user's portfolios."""
+    portfolio = crud.get_portfolio(db, req.portfolio_id, user.id)
     if portfolio is None:
         raise HTTPException(status_code=404, detail="portfolio not found")
 

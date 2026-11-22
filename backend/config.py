@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     rfr_us_fallback: float = 0.043
     rfr_india_fallback: float = 0.070
 
+    # --- Auth ---
+    # Dev-only default. In production set a strong SECRET_KEY env var (e.g.
+    # `python -c "import secrets; print(secrets.token_urlsafe(48))"`), otherwise
+    # JWTs could be forged. Loaded from the environment like everything else.
+    secret_key: str = "dev-secret-change-me-in-production"
+    access_token_expire_minutes: int = 60 * 24 * 7  # 7 days
+
 
 settings = Settings()
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 from .config import Market
 
@@ -95,6 +95,11 @@ class PortfolioOut(BaseModel):
     holdings: list[HoldingIn]
 
 
+class PortfolioUpdate(BaseModel):
+    """Editable fields on a saved portfolio (currently just the name)."""
+    name: str = Field(..., min_length=1, max_length=120)
+
+
 # --- Rebalancing ------------------------------------------------------------
 
 class RebalanceRequest(BaseModel):
@@ -120,6 +125,26 @@ class RebalanceResponse(BaseModel):
     actions: list[RebalanceAction]
     turnover: float        # sum of |delta| / 2
     rebalanced_metrics: PortfolioMetrics
+
+
+# --- Auth -------------------------------------------------------------------
+
+class UserCreate(BaseModel):
+    """Signup / login payload."""
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class UserOut(BaseModel):
+    id: int
+    email: EmailStr
+
+
+class Token(BaseModel):
+    """Returned by /auth/register and /auth/login."""
+    access_token: str
+    token_type: str = "bearer"
+    email: EmailStr
 
 
 # --- Misc -------------------------------------------------------------------
