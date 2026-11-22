@@ -163,9 +163,17 @@ def _logout(clear_strategy: bool = False) -> None:
     # to whoever uses the machine next). Background session-expiry paths keep it,
     # so a user can re-login without losing the work they're looking at.
     if clear_strategy:
-        for _k in ("result", "result_market", "result_method"):
+        for _k in ("result", "result_market", "result_method", "_opened_pid"):
             st.session_state.pop(_k, None)
-    _cookie_delete(_TOKEN_COOKIE)
+    # Defer the cookie deletion to the next run. Callers that rerun immediately
+    # (the Log out button) would otherwise abort the CookieManager delete
+    # component before the browser cleared the cookie — leaving it logged in.
+    st.session_state["_pending_cookie"] = ("del", None)
+    # Suppress cookie-restore for the rest of this session. The browser cookie
+    # delete is async, so a follow-up rerun's getAll could otherwise read the
+    # still-present cookie and silently log back in. A real page refresh starts a
+    # fresh session (flag gone) where the now-deleted cookie yields guest.
+    st.session_state["_logged_out"] = True
 
 
 def authenticate(mode: str, email: str, password: str) -> None:
@@ -173,7 +181,11 @@ def authenticate(mode: str, email: str, password: str) -> None:
     data = post(f"/auth/{mode}", {"email": email, "password": password})
     st.session_state["token"] = data["access_token"]
     st.session_state["user_email"] = data["email"]
-    _cookie_set(_TOKEN_COOKIE, data["access_token"])
+    st.session_state.pop("_logged_out", None)  # re-enable restore after a prior logout
+    # Defer writing the cookie to the next run: the caller reruns immediately,
+    # which aborts the CookieManager set component before the browser can
+    # persist it (this is why "stay logged in" silently did nothing on refresh).
+    st.session_state["_pending_cookie"] = ("set", data["access_token"])
 
 
 def section(title: str, sub: str = "") -> None:
@@ -247,11 +259,25 @@ def _cookie_delete(name: str) -> None:
         pass
 
 
+# Apply a cookie write deferred from a previous run (see authenticate / _logout).
+# Login and logout rerun immediately, so the real set/delete has to run on a
+# script run that actually completes — only then does the CookieManager
+# component reach the browser and persist the change.
+_pending = st.session_state.pop("_pending_cookie", None)
+if _pending:
+    _op, _val = _pending
+    if _op == "set":
+        _cookie_set(_TOKEN_COOKIE, _val)
+    elif _op == "del":
+        _cookie_delete(_TOKEN_COOKIE)  # also drops it from the in-memory cache,
+        # so the restore block below won't log the session straight back in.
+
+
 # Restore a prior session from the cookie so a hard refresh doesn't log you out.
 # esc returns None on the very first run, then reruns once its component mounts,
 # so this resolves on the following run. Validating via /auth/me also refreshes
 # the stored email and drops the cookie if the token has expired.
-if not st.session_state.get("token"):
+if not st.session_state.get("token") and not st.session_state.get("_logged_out"):
     _saved_token = _cookie_get(_TOKEN_COOKIE)
     if _saved_token:
         st.session_state["token"] = _saved_token
@@ -502,7 +528,10 @@ else:
             try:
                 saved = post("/portfolios", {
                     "name": save_name, "market": res_market,
-                    "holdings": [{"ticker": a["ticker"], "weight": a["weight"]} for a in result["allocations"]]},
+                    "holdings": [{"ticker": a["ticker"], "weight": a["weight"]} for a in result["allocations"]],
+                    # Snapshot the full view so clicking this portfolio later restores
+                    # its exact charts/returns/risk, not just the raw weights.
+                    "snapshot": result},
                     auth=True)
                 st.success(f"Saved portfolio #{saved['id']} — {saved['name']}")
             except httpx.HTTPStatusError as exc:
@@ -539,15 +568,66 @@ else:
         st.caption("You haven't saved any portfolios yet. Optimize one above and hit 💾 Save.")
 
     if portfolios:
-        st.dataframe(
-            pd.DataFrame([{"ID": p["id"], "Name": p["name"], "Market": p["market"],
-                           "Holdings": len(p["holdings"])} for p in portfolios]),
-            hide_index=True, width="stretch",
+        st.caption("Click a row to open a portfolio — its charts, returns and risk come back exactly as saved.")
+        pf_df = pd.DataFrame([
+            {"ID": p["id"], "Name": p["name"], "Market": p["market"],
+             "Holdings": len(p["holdings"]),
+             "Saved view": "✓" if p.get("snapshot") else "—"}
+            for p in portfolios
+        ])
+        event = st.dataframe(
+            pf_df, hide_index=True, width="stretch",
+            on_select="rerun", selection_mode="single-row", key="saved_table",
+            column_config={"Saved view": st.column_config.TextColumn(
+                "Saved view",
+                help="✓ = its charts/returns/risk were captured and can be restored in one click.")},
         )
+        sel_rows = event.selection.rows
 
-        labels = {f"#{p['id']} — {p['name']}": p["id"] for p in portfolios}
-        rc1, rc2, rc3, rc4 = st.columns([2, 1.3, 1, 1])
-        chosen = rc1.selectbox("Portfolio", list(labels.keys()))
+        # The active portfolio drives open / rebalance / rename / delete. Default
+        # to the first row until the user clicks one.
+        active = portfolios[sel_rows[0]] if sel_rows else portfolios[0]
+        _sel_id = active["id"]
+        chosen = f"#{active['id']} — {active['name']}"
+
+        def _restore(p: dict) -> bool:
+            """Load a saved portfolio's snapshot into the main view. Returns False
+            if it was saved before snapshots existed (nothing to restore)."""
+            snap = p.get("snapshot")
+            if snap and snap.get("metrics") and snap.get("allocations"):
+                st.session_state["result"] = snap
+                st.session_state["result_method"] = snap.get("method", "max_sharpe")
+                st.session_state["result_market"] = p["market"]
+                return True
+            return False
+
+        _no_snapshot_msg = (
+            "This portfolio was saved before its charts were captured. Re-optimize it "
+            "in the sidebar and **Save** again to enable one-click restore. (Rebalancing "
+            "below still works — it recomputes targets from live prices.)")
+
+        # Auto-open when the user clicks a *new* row. The id guard stops unrelated
+        # reruns (and a fresh Optimize) from re-triggering or clobbering the view.
+        if sel_rows and st.session_state.get("_opened_pid") != _sel_id:
+            st.session_state["_opened_pid"] = _sel_id
+            if _restore(active):
+                st.rerun()
+            else:
+                st.warning(_no_snapshot_msg)
+
+        oc1, oc2 = st.columns([3, 1])
+        oc1.markdown(f"**Selected:** {chosen}")
+        if oc2.button("📂 Open", type="primary", width="stretch",
+                      help="Restore this portfolio's charts, returns and risk into the view above."):
+            if _restore(active):
+                st.session_state["_opened_pid"] = _sel_id
+                st.rerun()
+            else:
+                st.warning(_no_snapshot_msg)
+
+        # --- Rebalance the selected portfolio ---
+        st.write("")
+        rc2, rc3, rc4 = st.columns([1.3, 1, 1])
         rb_method = rc2.selectbox("Target method", ["max_sharpe", "min_variance"],
                                   format_func=lambda m: METHOD_LABELS[m], key="rb_method")
         band = rc3.slider("Drift band (abs)", 0.0, 0.25, 0.05, step=0.01,
@@ -562,7 +642,7 @@ else:
         if st.button("♻️ Compute rebalance", type="primary"):
             try:
                 with st.spinner("Recomputing targets from live prices…"):
-                    rb = post("/rebalance", {"portfolio_id": labels[chosen],
+                    rb = post("/rebalance", {"portfolio_id": _sel_id,
                                              "method": rb_method, "drift_band": band,
                                              "relative_band": rel_band}, auth=True)
                 tc = rb["turnover"]
@@ -599,8 +679,7 @@ else:
 
         # --- Manage the selected portfolio (rename / delete) ---
         st.write("")
-        _sel_id = labels[chosen]
-        _cur_name = next((p["name"] for p in portfolios if p["id"] == _sel_id), "")
+        _cur_name = active["name"]
         mc1, mc2, _ = st.columns([1, 1, 2])
 
         with mc1:
