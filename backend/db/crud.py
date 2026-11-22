@@ -44,6 +44,7 @@ def create_portfolio(db: Session, data: PortfolioCreate, user_id: int) -> Portfo
         market=data.market.value,
         user_id=user_id,
         result_json=json.dumps(data.snapshot) if data.snapshot is not None else None,
+        initial_amount=data.initial_amount,
     )
     portfolio.holdings = [
         Holding(ticker=h.ticker, weight=h.weight) for h in data.holdings

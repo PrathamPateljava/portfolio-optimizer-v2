@@ -47,6 +47,9 @@ class Portfolio(Base):
     # exact charts/returns/risk later instead of only the raw weights. Nullable
     # so legacy rows (and pre-snapshot saves) stay valid.
     result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Capital the user chose to deploy at save time. Nullable (legacy rows and
+    # saves that skip it). Stored so growth can be measured against it later.
+    initial_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     owner: Mapped["User | None"] = relationship(back_populates="portfolios")
     holdings: Mapped[list["Holding"]] = relationship(
@@ -105,11 +108,28 @@ def _ensure_result_json_column() -> None:
         conn.execute(text("ALTER TABLE portfolios ADD COLUMN result_json TEXT"))
 
 
+def _ensure_initial_amount_column() -> None:
+    """Back-fill the portfolios.initial_amount column on an existing table.
+
+    Same reasoning as the other migrations here: create_all never alters an
+    existing table. Idempotent across SQLite/Postgres.
+    """
+    insp = inspect(engine)
+    if not insp.has_table("portfolios"):
+        return
+    cols = {c["name"] for c in insp.get_columns("portfolios")}
+    if "initial_amount" in cols:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE portfolios ADD COLUMN initial_amount FLOAT"))
+
+
 def init_db() -> None:
     """Create tables (users/portfolios/holdings) and run light migrations."""
     Base.metadata.create_all(bind=engine)
     _ensure_user_id_column()
     _ensure_result_json_column()
+    _ensure_initial_amount_column()
 
 
 def get_session():

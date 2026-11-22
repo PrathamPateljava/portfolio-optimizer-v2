@@ -53,6 +53,7 @@ class OptimizeRequest(BaseModel):
 class Allocation(BaseModel):
     ticker: str
     weight: float
+    price: float | None = None  # latest close per share (same market currency), for sizing buys
 
 
 class PortfolioMetrics(BaseModel):
@@ -90,6 +91,9 @@ class PortfolioCreate(BaseModel):
     # frontier) so the UI can restore the exact charts/returns/risk later.
     # Free-form so the contract doesn't break if OptimizeResponse evolves.
     snapshot: dict | None = None
+    # Capital the user intends to deploy into this portfolio, saved so growth
+    # can be tracked against it over time.
+    initial_amount: float | None = None
 
 
 class PortfolioOut(BaseModel):
@@ -99,6 +103,7 @@ class PortfolioOut(BaseModel):
     holdings: list[HoldingIn]
     # Present only if captured at save time; used to restore the saved view.
     snapshot: dict | None = None
+    initial_amount: float | None = None
 
 
 class PortfolioUpdate(BaseModel):

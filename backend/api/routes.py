@@ -41,12 +41,13 @@ _DEFAULT_DELTA = 2.5  # market risk-aversion for the Black-Litterman prior
 
 def _run_optimization(
     req: OptimizeRequest,
-) -> tuple[np.ndarray, list[str], object, object, float, list[FrontierPoint]]:
+) -> tuple[np.ndarray, list[str], object, object, float, list[FrontierPoint], dict[str, float]]:
     """Shared pipeline used by /optimize and /rebalance.
 
-    Returns (weights, tickers, mu_used, sigma_used, risk_free, frontier_points).
-    mu_used/sigma_used are the inputs the metrics should be computed against
-    (historical for MPT, posterior for Black-Litterman).
+    Returns (weights, tickers, mu_used, sigma_used, risk_free, frontier_points,
+    latest_prices). mu_used/sigma_used are the inputs the metrics should be
+    computed against (historical for MPT, posterior for Black-Litterman).
+    latest_prices maps each ticker to its most recent close (for sizing buys).
     """
     provider = YFinanceProvider()
     prices = provider.get_price_history(req.tickers, req.lookback_days)
@@ -56,6 +57,10 @@ def _run_optimization(
     sigma = returns.annual_covariance(prices, market)
     rf = get_risk_free_rate(market)
     tickers = list(mu.index)
+    # Most recent close per asset, from the history already fetched (no extra
+    # network call). The frontend turns these into share quantities.
+    _last = prices.iloc[-1]
+    latest_prices = {t: float(_last[t]) for t in tickers}
     frontier: list[FrontierPoint] = []
 
     if req.method == OptimizationMethod.MIN_VARIANCE:
@@ -91,7 +96,7 @@ def _run_optimization(
     else:  # pragma: no cover - enum is exhaustive
         raise HTTPException(status_code=400, detail=f"unknown method: {req.method}")
 
-    return w, tickers, mu_used, sigma_used, rf, frontier
+    return w, tickers, mu_used, sigma_used, rf, frontier, latest_prices
 
 
 def _to_portfolio_out(p: Portfolio) -> PortfolioOut:
@@ -107,6 +112,7 @@ def _to_portfolio_out(p: Portfolio) -> PortfolioOut:
         market=Market(p.market),
         holdings=[HoldingIn(ticker=h.ticker, weight=h.weight) for h in p.holdings],
         snapshot=snapshot,
+        initial_amount=p.initial_amount,
     )
 
 
@@ -116,11 +122,14 @@ def _to_portfolio_out(p: Portfolio) -> PortfolioOut:
 def optimize(req: OptimizeRequest) -> OptimizeResponse:
     """Run the chosen model and return weights + metrics (+ frontier)."""
     try:
-        w, tickers, mu_used, sigma_used, rf, frontier = _run_optimization(req)
+        w, tickers, mu_used, sigma_used, rf, frontier, prices = _run_optimization(req)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    allocations = [Allocation(ticker=t, weight=float(wi)) for t, wi in zip(tickers, w)]
+    allocations = [
+        Allocation(ticker=t, weight=float(wi), price=prices.get(t))
+        for t, wi in zip(tickers, w)
+    ]
     metrics = metrics_mod.portfolio_metrics(w, mu_used, sigma_used, rf)
     return OptimizeResponse(
         method=req.method, allocations=allocations, metrics=metrics, frontier=frontier
@@ -232,7 +241,7 @@ def rebalance(
     opt_req = OptimizeRequest(
         market=market, tickers=tickers, method=req.method, lookback_days=365, allow_short=False
     )
-    w, opt_tickers, mu_used, sigma_used, rf, _ = _run_optimization(opt_req)
+    w, opt_tickers, mu_used, sigma_used, rf, _, _ = _run_optimization(opt_req)
     target = {t: float(wi) for t, wi in zip(opt_tickers, w)}
 
     actions, turnover = rebalancing.compute_rebalance(

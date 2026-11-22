@@ -136,4 +136,16 @@ def test_snapshot_is_optional(client):
     """Saving without a snapshot (legacy/omitted) still works and reports None."""
     ha = {"Authorization": f"Bearer {_token(client, ALICE)}"}
     pid = client.post("/portfolios", json={**PF, "name": "NoSnap"}, headers=ha).json()["id"]
-    assert client.get(f"/portfolios/{pid}", headers=ha).json()["snapshot"] is None
+    got = client.get(f"/portfolios/{pid}", headers=ha).json()
+    assert got["snapshot"] is None
+    assert got["initial_amount"] is None
+
+
+def test_initial_amount_round_trips(client):
+    """The capital deployed at save time is persisted for growth tracking."""
+    ha = {"Authorization": f"Bearer {_token(client, ALICE)}"}
+    pid = client.post("/portfolios", json={**PF, "name": "WithCapital", "initial_amount": 25000.0},
+                      headers=ha).json()["id"]
+    assert client.get(f"/portfolios/{pid}", headers=ha).json()["initial_amount"] == 25000.0
+    listed = [p for p in client.get("/portfolios", headers=ha).json() if p["id"] == pid][0]
+    assert listed["initial_amount"] == 25000.0
